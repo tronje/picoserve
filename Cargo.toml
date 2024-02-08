@@ -5,6 +5,7 @@ members = [
     "examples/form",
     "examples/hello_world",
     "examples/hello_world_single_thread",
+    "examples/huge_requests",
     "examples/layers",
     "examples/path_parameters",
     "examples/server_sent_events",

@@ -182,18 +182,18 @@ async fn serve_and_shutdown<State, T: Timer, P: routing::PathRouter<State>, S: i
     let result = async {
         let (reader, mut writer) = socket.split();
 
-        let mut reader = MapReadErrorReader(reader);
+        let mut reader = request::Reader::new(MapReadErrorReader(reader), buffer);
 
         for request_count in 0.. {
-            let mut reader = match timer
+            match timer
                 .run_with_maybe_timeout(
                     config.timeouts.start_read_request.clone(),
-                    request::Reader::new(&mut reader, buffer),
+                    reader.request_is_pending(),
                 )
                 .await
             {
-                Ok(Ok(Some(reader))) => reader,
-                Ok(Ok(None)) | Err(_) => return Ok(request_count),
+                Ok(Ok(true)) => (),
+                Ok(Ok(false)) | Err(_) => return Ok(request_count),
                 Ok(Err(err)) => return Err(err),
             };
 
@@ -201,12 +201,13 @@ async fn serve_and_shutdown<State, T: Timer, P: routing::PathRouter<State>, S: i
                 .run_with_maybe_timeout(config.timeouts.read_request.clone(), reader.read())
                 .await
             {
-                Ok(Ok((request, connection))) => {
+                Ok(Ok(request)) => {
                     let connection_header = match config.connection {
                         KeepAlive::Close => KeepAlive::Close,
-                        KeepAlive::KeepAlive => {
-                            KeepAlive::from_request(request.http_version(), request.headers())
-                        }
+                        KeepAlive::KeepAlive => KeepAlive::from_request(
+                            request.parts.http_version(),
+                            request.parts.headers(),
+                        ),
                     };
 
                     let mut writer = time::WriteWithTimeout {
@@ -219,13 +220,9 @@ async fn serve_and_shutdown<State, T: Timer, P: routing::PathRouter<State>, S: i
                         .call_path_router(
                             state,
                             routing::NoPathParameters,
-                            request.path(),
+                            request.parts.path(),
                             request,
-                            response::ResponseStream::new(
-                                connection,
-                                &mut writer,
-                                connection_header,
-                            ),
+                            response::ResponseStream::new(&mut writer, connection_header),
                         )
                         .await?;
 
@@ -385,11 +382,11 @@ pub async fn serve<T: Timer, P: routing::PathRouter, S: io::Socket>(
 
 #[cfg(not(any(feature = "tokio", feature = "embassy")))]
 /// Serve `app` with incoming requests. App has a state of `State`.
-pub async fn serve_with_state<State, T: Timer, P: routing::PathRouter<State>, S: io::Socket>(
+pub async fn serve_with_state<'r, State, T: Timer, P: routing::PathRouter<State>, S: io::Socket>(
     app: &Router<P, State>,
     timer: T,
     config: &Config<T::Duration>,
-    buffer: &mut [u8],
+    buffer: &'r mut [u8],
     socket: S,
     state: &State,
 ) -> Result<u64, Error<S::Error>> {

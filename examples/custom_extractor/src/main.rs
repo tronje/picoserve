@@ -9,22 +9,35 @@ struct Number {
 }
 
 enum BadRequest {
+    ReadError,
     NotUtf8(core::str::Utf8Error),
     BadNumber(core::num::ParseIntError),
 }
 
 impl IntoResponse for BadRequest {
-    async fn write_to<W: picoserve::response::ResponseWriter>(
+    async fn write_to<
+        R: picoserve::io::Read,
+        W: picoserve::response::ResponseWriter<Error = R::Error>,
+    >(
         self,
+        connection: picoserve::response::Connection<'_, R>,
         response_writer: W,
     ) -> Result<picoserve::ResponseSent, W::Error> {
         match self {
+            BadRequest::ReadError => {
+                (
+                    picoserve::response::status::BAD_REQUEST,
+                    format_args!("Read Error"),
+                )
+                    .write_to(connection, response_writer)
+                    .await
+            }
             BadRequest::NotUtf8(err) => {
                 (
                     picoserve::response::status::BAD_REQUEST,
                     format_args!("Request Body is not UTF-8: {err}"),
                 )
-                    .write_to(response_writer)
+                    .write_to(connection, response_writer)
                     .await
             }
             BadRequest::BadNumber(err) => {
@@ -32,7 +45,7 @@ impl IntoResponse for BadRequest {
                     picoserve::response::status::BAD_REQUEST,
                     format_args!("Request Body is not a valid integer: {err}"),
                 )
-                    .write_to(response_writer)
+                    .write_to(connection, response_writer)
                     .await
             }
         }
@@ -42,15 +55,21 @@ impl IntoResponse for BadRequest {
 impl<State> FromRequest<State> for Number {
     type Rejection = BadRequest;
 
-    async fn from_request(
+    async fn from_request<R: picoserve::io::Read>(
         _state: &State,
-        request: &picoserve::request::Request<'_>,
+        _request_parts: picoserve::request::RequestParts<'_>,
+        request_body: picoserve::request::RequestBody<'_, R>,
     ) -> Result<Self, Self::Rejection> {
         Ok(Number {
-            value: core::str::from_utf8(request.body())
-                .map_err(BadRequest::NotUtf8)?
-                .parse()
-                .map_err(BadRequest::BadNumber)?,
+            value: core::str::from_utf8(
+                request_body
+                    .read_all()
+                    .await
+                    .map_err(|_err| BadRequest::ReadError)?,
+            )
+            .map_err(BadRequest::NotUtf8)?
+            .parse()
+            .map_err(BadRequest::BadNumber)?,
         })
     }
 }

@@ -19,8 +19,9 @@ pub enum WebSocketUpgradeRejection {
 }
 
 impl super::IntoResponse for WebSocketUpgradeRejection {
-    async fn write_to<W: super::ResponseWriter>(
+    async fn write_to<R: Read, W: super::ResponseWriter<Error = R::Error>>(
         self,
+        connection: super::Connection<'_, R>,
         response_writer: W,
     ) -> Result<crate::ResponseSent, W::Error> {
         (
@@ -31,7 +32,7 @@ impl super::IntoResponse for WebSocketUpgradeRejection {
                         status::METHOD_NOT_ALLOWED,
                         "Websocket upgrades must use the `GET` method\n",
                     )
-                        .write_to(response_writer)
+                        .write_to(connection, response_writer)
                         .await
                 }
                 WebSocketUpgradeRejection::InvalidConnectionHeader => {
@@ -48,7 +49,7 @@ impl super::IntoResponse for WebSocketUpgradeRejection {
                 }
             },
         )
-            .write_to(response_writer)
+            .write_to(connection, response_writer)
             .await
     }
 }
@@ -95,15 +96,16 @@ impl WebSocketUpgrade {
 impl<State> crate::extract::FromRequest<State> for WebSocketUpgrade {
     type Rejection = WebSocketUpgradeRejection;
 
-    async fn from_request(
+    async fn from_request<R: Read>(
         _state: &State,
-        request: &crate::request::Request<'_>,
+        request_parts: crate::request::RequestParts<'_>,
+        _request_body: crate::request::RequestBody<'_, R>,
     ) -> Result<Self, Self::Rejection> {
-        if !request.method().eq_ignore_ascii_case("get") {
+        if !request_parts.method().eq_ignore_ascii_case("get") {
             return Err(WebSocketUpgradeRejection::MethodNotGet);
         }
 
-        if request
+        if request_parts
             .headers()
             .get("upgrade")
             .map_or(true, |upgrade| !upgrade.eq_ignore_ascii_case("websocket"))
@@ -111,11 +113,11 @@ impl<State> crate::extract::FromRequest<State> for WebSocketUpgrade {
             return Err(WebSocketUpgradeRejection::InvalidUpgradeHeader);
         }
 
-        if request.headers().get("sec-websocket-version") != Some("13") {
+        if request_parts.headers().get("sec-websocket-version") != Some("13") {
             return Err(WebSocketUpgradeRejection::InvalidWebSocketVersionHeader);
         }
 
-        let key = request
+        let key = request_parts
             .headers()
             .get("sec-websocket-key")
             .map(|key| {
@@ -132,7 +134,7 @@ impl<State> crate::extract::FromRequest<State> for WebSocketUpgrade {
             })
             .ok_or(WebSocketUpgradeRejection::WebSocketKeyHeaderMissing)?;
 
-        let protocols = request
+        let protocols = request_parts
             .headers()
             .get("sec-websocket-protocol")
             .and_then(|protocol| {
@@ -589,17 +591,25 @@ impl<C: WebSocketCallback> super::Body for UpgradedWebSocketBody<C> {
         W: embedded_io_async::Write<Error = R::Error>,
     >(
         self,
-        super::Connection(reader): super::Connection<R>,
+        connection: super::Connection<'_, R>,
         mut writer: W,
     ) -> Result<(), W::Error> {
         writer.flush().await?;
-        self.0.run(SocketRx { reader }, SocketTx { writer }).await
+        self.0
+            .run(
+                SocketRx {
+                    reader: connection.upgrade(),
+                },
+                SocketTx { writer },
+            )
+            .await
     }
 }
 
 impl<P: WebSocketProtocol, C: WebSocketCallback> super::IntoResponse for UpgradedWebSocket<P, C> {
-    async fn write_to<W: super::ResponseWriter>(
+    async fn write_to<R: Read, W: super::ResponseWriter<Error = R::Error>>(
         self,
+        connection: super::Connection<'_, R>,
         response_writer: W,
     ) -> Result<crate::ResponseSent, W::Error> {
         let UpgradedWebSocket {
@@ -610,6 +620,7 @@ impl<P: WebSocketProtocol, C: WebSocketCallback> super::IntoResponse for Upgrade
 
         response_writer
             .write_response(
+                connection,
                 super::Response {
                     status_code: status::SWITCHING_PROTOCOLS,
                     headers: [
