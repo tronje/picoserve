@@ -190,3 +190,55 @@ impl<S, T: FromRef<S>> FromRequestParts<S> for State<T> {
         Ok(State(T::from_ref(state)))
     }
 }
+
+#[derive(Debug)]
+pub struct NoUpgradeHeader;
+
+impl IntoResponse for NoUpgradeHeader {
+    async fn write_to<R: Read, W: crate::response::ResponseWriter<Error = R::Error>>(
+        self,
+        connection: crate::response::Connection<'_, R>,
+        response_writer: W,
+    ) -> Result<ResponseSent, W::Error> {
+        (
+            status::BAD_REQUEST,
+            "Connection header did not include `upgrade`\n",
+        )
+            .write_to(connection, response_writer)
+            .await
+    }
+}
+
+/// A token which allows a connection to be upgraded. Verifies that the "Upgrade" header has been set
+#[derive(Debug)]
+pub struct UpgradeToken(());
+
+impl<State> FromRequestParts<State> for UpgradeToken {
+    type Rejection = NoUpgradeHeader;
+
+    async fn from_request_parts(
+        _state: &State,
+        request_parts: &RequestParts<'_>,
+    ) -> Result<Self, Self::Rejection> {
+        request_parts
+            .headers()
+            .get("upgrade")
+            .map(|_| Self(()))
+            .ok_or(NoUpgradeHeader)
+    }
+}
+
+impl UpgradeToken {
+    pub(crate) async fn discard_all_data<R: Read>(
+        connection: crate::response::Connection<'_, R>,
+    ) -> Result<(), R::Error> {
+        // Consumes and discards all data, so cannot gain access to the next requests data,
+        // and the connection is consumed so cannot be upgraded after this call
+
+        let mut reader = connection.upgrade(UpgradeToken(()));
+
+        while reader.read(&mut [0; 8]).await? > 0 {}
+
+        Ok(())
+    }
+}

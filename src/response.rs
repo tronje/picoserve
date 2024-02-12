@@ -49,34 +49,66 @@ impl fmt::Write for MeasureFormatSize {
     }
 }
 
+pub(crate) struct BufferedReader<'r, R: Read> {
+    pub(crate) reader: R,
+    pub(crate) buffer: &'r mut [u8],
+    pub(crate) read_position: usize,
+    pub(crate) buffer_usage: usize,
+}
+
+impl<'r, R: Read> BufferedReader<'r, R> {
+    async fn read_into(&mut self, buffer: &mut [u8]) -> Result<usize, R::Error> {
+        let prefix = &self.buffer[self.read_position..self.buffer_usage];
+
+        if prefix.is_empty() {
+            self.reader.read(buffer).await
+        } else {
+            let read_size = prefix.len().min(buffer.len());
+
+            buffer[..read_size].copy_from_slice(prefix);
+            self.read_position += read_size;
+
+            Ok(read_size)
+        }
+    }
+}
+
+pub struct UpgradedConnection<'r, R: Read> {
+    reader: BufferedReader<'r, R>,
+}
+
+impl<'r, R: Read> crate::io::ErrorType for UpgradedConnection<'r, R> {
+    type Error = R::Error;
+}
+
+impl<'r, R: Read> Read for UpgradedConnection<'r, R> {
+    async fn read(&mut self, buffer: &mut [u8]) -> Result<usize, Self::Error> {
+        self.reader.read_into(buffer).await
+    }
+}
+
 /// A handle to the current conneection. Allows a long-lasting response to check if the client has disconnected.
 pub struct Connection<'r, R: Read> {
-    reader: R,
-    has_been_upgraded: &'r mut bool,
+    pub(crate) reader: BufferedReader<'r, R>,
+    pub(crate) has_been_upgraded: &'r mut bool,
 }
 
 impl<'r, R: Read> Connection<'r, R> {
-    pub(crate) fn new(reader: R, has_been_upgraded: &'r mut bool) -> Self {
-        Self {
-            reader,
-            has_been_upgraded,
-        }
-    }
-
     /// Upgrade the connection and get access to the inner reader
-    pub fn upgrade(self) -> impl Read<Error = R::Error> {
+    pub fn upgrade(
+        self,
+        _upgrade_token: crate::extract::UpgradeToken,
+    ) -> UpgradedConnection<'r, R> {
         *self.has_been_upgraded = true;
 
-        self.reader
+        UpgradedConnection {
+            reader: self.reader,
+        }
     }
 
     /// Wait for the client to disconnect. This will discard any additional data sent by the client.
     pub async fn wait_for_disconnection(self) -> Result<(), R::Error> {
-        let mut reader = self.upgrade();
-
-        while reader.read(&mut [0; 8]).await? > 0 {}
-
-        Ok(())
+        crate::extract::UpgradeToken::discard_all_data(self).await
     }
 }
 

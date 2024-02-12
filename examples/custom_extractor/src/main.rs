@@ -2,16 +2,20 @@
 
 use std::time::Duration;
 
-use picoserve::{extract::FromRequest, response::IntoResponse, routing::post};
+use picoserve::{
+    extract::FromRequest,
+    response::IntoResponse,
+    routing::{get_service, post},
+};
 
 struct Number {
-    value: i32,
+    value: f32,
 }
 
 enum BadRequest {
     ReadError,
     NotUtf8(core::str::Utf8Error),
-    BadNumber(core::num::ParseIntError),
+    BadNumber(core::num::ParseFloatError),
 }
 
 impl IntoResponse for BadRequest {
@@ -75,15 +79,25 @@ impl<State> FromRequest<State> for Number {
 }
 
 async fn handler_with_extractor(Number { value }: Number) -> impl IntoResponse {
-    picoserve::response::DebugValue(("number", value))
+    picoserve::response::DebugValue(value)
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let port = 8000;
 
-    let app =
-        std::rc::Rc::new(picoserve::Router::new().route("/number", post(handler_with_extractor)));
+    let app = std::rc::Rc::new(
+        picoserve::Router::new()
+            .route(
+                "/",
+                get_service(picoserve::response::File::html(include_str!("index.html"))),
+            )
+            .route(
+                "/index.js",
+                get_service(picoserve::response::File::html(include_str!("index.js"))),
+            )
+            .route("/number", post(handler_with_extractor)),
+    );
 
     let config = picoserve::Config::new(picoserve::Timeouts {
         start_read_request: Some(Duration::from_secs(5)),

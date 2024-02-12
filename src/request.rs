@@ -267,6 +267,12 @@ impl<'r, R: Read> crate::io::ErrorType for RequestBodyReader<'r, R> {
     type Error = R::Error;
 }
 
+impl<'r, R: Read> RequestBodyReader<'r, R> {
+    pub fn content_length(&self) -> usize {
+        self.content_length
+    }
+}
+
 impl<'r, R: Read> Read for RequestBodyReader<'r, R> {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         let read_size = if self.current_data.is_empty() {
@@ -311,21 +317,31 @@ pub struct RequestBody<'r, R: Read> {
 }
 
 impl<'r, R: Read> RequestBody<'r, R> {
+    pub fn content_length(&self) -> usize {
+        self.content_length
+    }
+
     pub async fn read_all(self) -> Result<&'r mut [u8], ReadAllBodyError<R::Error>> {
         let buffer = self
             .buffer
             .get_mut(..self.content_length)
             .ok_or(ReadAllBodyError::BufferIsTooSmall)?;
 
-        self.reader
-            .read_exact(&mut buffer[*self.buffer_usage..])
-            .await
-            .map_err(|err| match err {
-                embedded_io_async::ReadExactError::UnexpectedEof => ReadAllBodyError::UnexpectedEof,
-                embedded_io_async::ReadExactError::Other(err) => ReadAllBodyError::IO(err),
-            })?;
+        if let Some(remaining_body_to_read) = buffer.get_mut(*self.buffer_usage..) {
+            self.reader
+                .read_exact(remaining_body_to_read)
+                .await
+                .map_err(|err| match err {
+                    embedded_io_async::ReadExactError::UnexpectedEof => {
+                        ReadAllBodyError::UnexpectedEof
+                    }
+                    embedded_io_async::ReadExactError::Other(err) => ReadAllBodyError::IO(err),
+                })?;
 
-        *self.buffer_usage = buffer.len();
+            *self.buffer_usage = self.content_length;
+        }
+
+        *self.read_position = self.content_length;
 
         Ok(buffer)
     }
@@ -350,6 +366,10 @@ pub struct RequestBodyConnection<'r, R: Read> {
 }
 
 impl<'r, R: Read> RequestBodyConnection<'r, R> {
+    pub fn content_length(&self) -> usize {
+        self.content_length
+    }
+
     pub fn body(&mut self) -> RequestBody<'_, R> {
         RequestBody {
             content_length: self.content_length,
@@ -363,32 +383,22 @@ impl<'r, R: Read> RequestBodyConnection<'r, R> {
     pub async fn finalize(
         self,
     ) -> Result<crate::response::Connection<'r, impl Read<Error = R::Error> + 'r>, R::Error> {
-        struct ReaderWithPrefix<'r, R: Read> {
-            reader: R,
-            prefix: &'r [u8],
+        // If the entire body is already in the buffer
+        if self.content_length <= self.buffer_usage {
+            return Ok(crate::response::Connection {
+                reader: crate::response::BufferedReader {
+                    reader: self.reader,
+                    buffer: self.buffer,
+                    read_position: self.content_length,
+                    buffer_usage: self.buffer_usage,
+                },
+                has_been_upgraded: self.has_been_upgraded,
+            });
         }
 
-        impl<'r, R: Read> crate::io::ErrorType for ReaderWithPrefix<'r, R> {
-            type Error = R::Error;
-        }
+        // Data after the body has not yet been read, the entire buffer can be used to read the rest of the body
 
-        impl<'r, R: Read> Read for ReaderWithPrefix<'r, R> {
-            async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-                if self.prefix.is_empty() {
-                    self.reader.read(buf).await
-                } else {
-                    let read_size = self.prefix.len().min(buf.len());
-
-                    let (prefix, rest) = self.prefix.split_at(read_size);
-
-                    buf[..read_size].copy_from_slice(prefix);
-                    self.prefix = rest;
-
-                    Ok(read_size)
-                }
-            }
-        }
-
+        // Skip the section that has already been read into the buffer
         let mut read_position = self.read_position.max(self.buffer_usage);
 
         while let Some(data_remaining) = self
@@ -396,10 +406,7 @@ impl<'r, R: Read> RequestBodyConnection<'r, R> {
             .checked_sub(read_position)
             .and_then(core::num::NonZeroUsize::new)
         {
-            let read_buffer_size = data_remaining
-                .get()
-                .min(self.content_length)
-                .min(self.buffer.len());
+            let read_buffer_size = data_remaining.get().min(self.buffer.len());
 
             let read_size = self
                 .reader
@@ -407,28 +414,21 @@ impl<'r, R: Read> RequestBodyConnection<'r, R> {
                 .await?;
 
             if read_size == 0 {
-                return Ok(crate::response::Connection::new(
-                    ReaderWithPrefix {
-                        reader: self.reader,
-                        prefix: &[],
-                    },
-                    self.has_been_upgraded,
-                ));
+                break;
             }
 
             read_position += read_size;
         }
 
-        Ok(crate::response::Connection::new(
-            ReaderWithPrefix {
+        Ok(crate::response::Connection {
+            reader: crate::response::BufferedReader {
                 reader: self.reader,
-                prefix: self
-                    .buffer
-                    .get(self.content_length..(read_position.max(self.buffer_usage)))
-                    .unwrap_or(&[]),
+                buffer: self.buffer,
+                read_position: 0,
+                buffer_usage: 0,
             },
-            self.has_been_upgraded,
-        ))
+            has_been_upgraded: self.has_been_upgraded,
+        })
     }
 }
 
