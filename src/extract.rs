@@ -25,6 +25,8 @@ mod private {
     pub struct ViaParts;
 }
 
+pub use crate::json::Json;
+
 /// Types that can be created from requests parts (everything except the request body).
 pub trait FromRequestParts<'r, State>: Sized {
     /// If the extractor fails this “rejection” type is returned, which converted into a response and returned.
@@ -450,6 +452,61 @@ impl<'r, State, T: serde::de::DeserializeOwned> FromRequest<'r, State> for Form<
         ))
         .map(Self)
         .map_err(|super::url_encoded::FormDeserializationError| FormRejection::BadForm)
+    }
+}
+
+#[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum JsonRejection {
+    FailedToReadBody,
+    FailedToDeserializeBody(
+        #[cfg_attr(feature = "defmt", Debug2Format)] serde_json_core::de::Error,
+    ),
+}
+
+impl IntoResponse for JsonRejection {
+    async fn write_to<R: Read, W: crate::response::ResponseWriter<Error = R::Error>>(
+        self,
+        connection: crate::response::Connection<'_, R>,
+        response_writer: W,
+    ) -> Result<ResponseSent, W::Error> {
+        let status_code = StatusCode::BAD_REQUEST;
+
+        match self {
+            JsonRejection::FailedToReadBody => {
+                (status_code, "Failed to read body")
+                    .write_to(connection, response_writer)
+                    .await
+            }
+            JsonRejection::FailedToDeserializeBody(err) => {
+                (
+                    status_code,
+                    format_args!("Failed to deserialize body as JSON: {err:?}"),
+                )
+                    .write_to(connection, response_writer)
+                    .await
+            }
+        }
+    }
+}
+
+impl<'r, State, T: serde::Deserialize<'r>> FromRequest<'r, State> for Json<T> {
+    type Rejection = JsonRejection;
+
+    async fn from_request<R: Read>(
+        _state: &'r State,
+        _request_parts: RequestParts<'r>,
+        request_body: RequestBody<'r, R>,
+    ) -> Result<Self, Self::Rejection> {
+        serde_json_core::from_slice_using_string_unescape_buffer(
+            request_body
+                .read_all()
+                .await
+                .map_err(|_| JsonRejection::FailedToReadBody)?,
+            &mut [0; 1024],
+        )
+        .map(|(value, _)| Self(value))
+        .map_err(JsonRejection::FailedToDeserializeBody)
     }
 }
 

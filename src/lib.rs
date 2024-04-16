@@ -24,6 +24,8 @@ pub mod routing;
 pub mod time;
 pub mod url_encoded;
 
+pub mod json;
+
 #[cfg(test)]
 mod tests;
 
