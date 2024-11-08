@@ -38,8 +38,6 @@ categories = ["asynchronous", "network-programming", "web-programming::http-serv
 const-sha1 = { version = "0.3.0", default-features = false }
 data-encoding = { version = "2.4.0", default-features = false }
 defmt = { version = "0.3.6", optional = true }
-embassy-net = { version = "0.4.0", optional = true, features = ["tcp", "proto-ipv4", "medium-ethernet"] }
-embassy-time = { version = "0.3.0", optional = true }
 embedded-io-async = "0.6.0"
 futures-util = { version = "0.3.28", default-features = false }
 heapless = { version = "0.8.0", features = ["serde"] }
@@ -49,6 +47,21 @@ ryu = "1.0.14"
 serde = { version = "1.0.171", default-features = false, features = ["derive"] }
 serde-json-core = "0.6.0"
 tokio = { version = "1.32.0", optional = true, features = ["io-util", "net", "time"] }
+
+[dependencies.embassy-net]
+git = "https://github.com/embassy-rs/embassy"
+rev = "5b075077090ec1436437c82011554649e909c8ee"
+optional = true
+features = [
+    "tcp",
+    "proto-ipv4",
+    "medium-ethernet",
+]
+
+[dependencies.embassy-time]
+git = "https://github.com/embassy-rs/embassy"
+rev = "5b075077090ec1436437c82011554649e909c8ee"
+optional = true
 
 [features]
 std = ["alloc"]
